@@ -20,6 +20,12 @@ export const COMMENTS_NODE_PREFIX = 'urn:xmpp:microblog:0:comments/';
  * and `publish_model` are `open` so *anyone* can read and add a comment — the
  * author pre-creates the node when publishing the post, since a foreign
  * commenter can't create nodes on the author's PEP service.
+ *
+ * `deliver_payloads` is `true` for the same reasons as
+ * {@link MICROBLOG_PUBLISH_OPTIONS}. XEP-0277 makes no recommendation either way
+ * for comments nodes and XEP-0472's Base profile doesn't cover them, but Movim
+ * configures them notification-only, so the fetch-on-header fallback matters here
+ * too.
  */
 export const COMMENTS_PUBLISH_OPTIONS = {
     access_model: 'open',
@@ -92,6 +98,18 @@ export const BROWSE_PAGE_SIZE = 100;
  * Node configuration for our own social feed node, sent as XEP-0060
  * publish-options. This is the XEP-0472 "Base profile" config, plus an open
  * access model.
+ *
+ * `deliver_payloads` is a deliberate deviation: XEP-0472 § Base profile says it
+ * SHOULD be `false` (subscribers get bare `<item id/>` headers and fetch the
+ * content on demand, since social content can be large). That suits a caching
+ * server-side client like Movim, but not a browser client. Notification-only
+ * delivery turns each publish into a fetch per item per subscriber per online
+ * resource, aimed back at the publisher's service at exactly the moment of
+ * publish; it delays every post behind a round trip; and it forces a fetch before
+ * we can even decide whether a comment or ♥ warrants a notification. Since we
+ * persist what we're notified about anyway, pushing the payload is the cheaper
+ * side of the trade. We still *accept* notification-only nodes we don't own
+ * (`resolveItemPayloads` in `./utils.js`).
  */
 export const MICROBLOG_PUBLISH_OPTIONS = {
     access_model: 'open',

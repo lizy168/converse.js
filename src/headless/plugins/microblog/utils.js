@@ -85,6 +85,44 @@ function resyncFollowing() {
 }
 
 /**
+ * Retrieve the payloads of any items that arrived as a bare `<item id/>` header,
+ * as a node whose `pubsub#deliver_payloads` is `false` pushes them. We never
+ * configure our own nodes that way (see `MICROBLOG_PUBLISH_OPTIONS` in
+ * `./constants.js` for why), but we don't own the nodes we follow, and Movim
+ * configures both its community feeds and its per-post comments nodes as
+ * notification-only. Without this, a live post or comment from such a node would
+ * reach the Atom parser payload-less and be dropped, only appearing on the next
+ * full fetch.
+ *
+ * The retrieval itself is `api.pubsub.items.resolve`; what's microblog policy is
+ * the rest: a header for an item we already hold isn't fetched at all, as Movim's
+ * own fallback also does. It keeps a redelivered comment from raising a second
+ * notification, and drops the id from a batch we'd otherwise ask the service to
+ * re-send content we have. The cost is that an *edit* republished under the same
+ * id goes unseen on such a node, because a bare header carries nothing that tells
+ * an edit from a redelivery.
+ *
+ * Authorship on a resolved item is whatever the payload claims, unless the node's
+ * config makes the server stamp it. Prosody strips the `publisher` attribute from
+ * a retrieval response unless the service sets `expose_publisher`, or (13.0+) the
+ * node's `pubsub#itemreply` is `publisher`. Movim sets `itemreply`, so its nodes do
+ * carry it; on a node that doesn't, `is_mine` falls back to the entry's
+ * self-asserted `<author>`.
+ *
+ * @param {import('./feed').default} feed - The feed the items belong to.
+ * @param {Element[]} items
+ * @returns {Promise<Element[]>}
+ */
+async function resolveItemPayloads(feed, items) {
+    const { jid, node } = feed.attrs;
+    // The collection can only answer "do we have this already" once hydrated,
+    // which is what addItems waits on too.
+    await feed.messages.hydrated;
+    const wanted = items.filter((el) => el.firstElementChild || !feed.messages.get(el.getAttribute('id')));
+    return api.pubsub.items.resolve(jid, node, wanted);
+}
+
+/**
  * Handle an incoming PEP/PubSub event, routing items to the relevant feed. A feed
  * is auto-created only for the user's own microblog node; events from any other
  * node are applied only to a feed the user already follows (a contact's microblog
@@ -144,21 +182,20 @@ export function handleMicroblogEvent(message) {
                 // Snapshot the thread's existing comment ids so a re-delivered
                 // item (already present) can't raise a second notification.
                 const known = is_comments ? new Set(feed.messages.models.map((m) => m.get('id'))) : null;
-                const added = feed.addItems(items);
                 // A live comment/like landing on a materialised (pinned/open)
                 // thread updates the owning post's denormalised counts, so the
                 // timeline reflects it without reopening the thread, and a comment
                 // or like on one of *our* posts raises a desktop notification.
-                // addItems is async, so guard the follow-up against an escaping
-                // rejection.
-                if (is_comments) {
-                    added
-                        .then((comments) => {
-                            syncCommentThread(from, node, feed);
-                            notifyOfThreadActivity(from, node, comments, known);
-                        })
-                        .catch((e) => log.error(e));
-                }
+                // Resolution and addItems are both async, so the one catch at the
+                // end of the chain keeps a rejection from escaping.
+                resolveItemPayloads(feed, items)
+                    .then((resolved) => feed.addItems(resolved))
+                    .then((added) => {
+                        if (!is_comments) return;
+                        syncCommentThread(from, node, feed);
+                        notifyOfThreadActivity(from, node, added, known);
+                    })
+                    .catch((e) => log.error(e));
             }
             if (retracts.length) {
                 feed.removeItems(retracts);
